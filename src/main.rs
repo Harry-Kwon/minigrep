@@ -1,7 +1,7 @@
 use std::env;
 use std::process;
 
-use minigrep::Config;
+use minigrep::config::Config;
 
 fn main() {
     // get command line arguments as a vector

@@ -1,56 +1,60 @@
 use std::error::Error;
 use std::fs;
-use std::iter::Filter;
+use std::rc::Rc;
 
-pub struct Config {
-    pub query: String,
-    pub file_path: String,
-}
-
-impl Config {
-    pub fn build(args: &[String]) -> Result<Config, &str> {
-        if args.len() < 3 {
-            return Err("not enough arguments");
-        }
-
-        let query = args[1].clone();
-        let file_path = args[2].clone();
-
-        return Ok(Config { query, file_path });
-    }
-}
+pub mod config;
+use config::Config;
 
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let contents = fs::read_to_string(config.file_path)?;
 
-    search(&config.query, &contents, None)
+    let mut filter_builder = FilterStrategyBuilder::new(Some(Rc::new(|query, line| line.contains(query))));
+
+    if let Some(v) = config.min_line_len {
+        filter_builder.and(Rc::new(move |_, line| line.len() >= v.try_into().unwrap()));
+    }
+
+    if let Some(v) = config.max_line_len {
+        filter_builder.and(Rc::new(move |_, line| line.len() >= v.try_into().unwrap()));
+    }
+
+    let filter = filter_builder.build();
+
+    search(&config.query, &contents, Some(filter))
         .iter()
         .for_each(|line| println!("{line}"));
 
     Ok(())
 }
 
+// |query, line| -> filter_result
 type FilterStrategy = dyn Fn(&str, &str) -> bool;
 struct FilterStrategyBuilder {
-    strategy: Box<FilterStrategy>
+    strategy: Rc<FilterStrategy>,
 }
 
 impl FilterStrategyBuilder {
-    fn new(f: Option<Box<FilterStrategy>>) -> FilterStrategyBuilder{
-        FilterStrategyBuilder { strategy: f.unwrap_or(Box::new(|_, _| true)) }
+    fn new(f: Option<Rc<FilterStrategy>>) -> FilterStrategyBuilder {
+        FilterStrategyBuilder {
+            strategy: f.unwrap_or(Rc::new(|_, _| true)),
+        }
     }
 
-    fn build(&self) -> Box<FilterStrategy> {
-        self.strategy
+    fn build(&self) -> Rc<FilterStrategy> {
+        self.strategy.clone()
     }
 
-    fn and(&self, f: Box<FilterStrategy>) -> &FilterStrategyBuilder{
-        self.strategy = Box::new(|query, line| ((self.strategy)(query, line) && f(query, line)));
+    fn and(&mut self, f: Rc<FilterStrategy>) -> &mut FilterStrategyBuilder {
+        let s = self.strategy.clone();
+        self.strategy =
+            Rc::new(move |query, line| (s(query, line) && f(query, line)));
         self
     }
 
-    fn or(&self, f: Box<FilterStrategy>) -> &FilterStrategyBuilder {
-        self.strategy = Box::new(|query, line| ((self.strategy)(query, line) || f(query, line)));
+    fn or(&mut self, f: Rc<FilterStrategy>) -> &mut FilterStrategyBuilder {
+        let s = self.strategy.clone();
+        self.strategy =
+            Rc::new(move |query, line| (s(query, line) || f(query, line)));
         self
     }
 }
@@ -58,10 +62,11 @@ impl FilterStrategyBuilder {
 pub fn search<'a>(
     query: &str,
     contents: &'a str,
-    filter_strategy: Option<Box<FilterStrategy>>,
+    filter_strategy: Option<Rc<FilterStrategy>>,
 ) -> Vec<&'a str> {
     // unwrap the optional filter_strategy and
-    let filter_strategy = filter_strategy.unwrap_or(Box::new(|q: &str, line: &str| line.contains(q)));
+    let filter_strategy =
+        filter_strategy.unwrap_or(Rc::new(|q: &str, line: &str| line.contains(q)));
 
     contents
         .split("\n")
@@ -87,20 +92,45 @@ Pick three.";
         );
     }
 
-    fn build_filter() {
+    #[test]
+    fn build_and_filter() {
         let query = "duct";
         let contents = "\
 Rust:
 safe, fast, productive.
 this line is over twenty characters long I think
 Pick three.";
-        let filter: Box<FilterStrategy> = FilterStrategyBuilder::new(None)
-            .and(Box::new(|_query, line| line.len() > 5))
-            .and(Box::new(|_query, line| line.len() < 20))
-            .build();
+
+        let mut builder = FilterStrategyBuilder::new(None);
+
+        builder.and(Rc::new(|_query, line| line.len() > 5));
+
+        builder.and(Rc::new(|_query, line| line.len() < 25));
+
+        let filter = builder.build();
 
         assert_eq!(
             vec!["safe, fast, productive.", "Pick three."],
+            search(query, contents, Some(filter))
+        );
+    }
+
+    #[test]
+    fn build_or_filter() {
+        let query = "Rust";
+        let contents = "\
+Rust:
+safe, fast, productive.
+this line is over twenty characters long I think
+Pick three.";
+        let filter: Rc<FilterStrategy> = FilterStrategyBuilder::new(None)
+            .and(Rc::new(|_query, line| line.len() > 5))
+            .and(Rc::new(|_query, line| line.len() < 25))
+            .or(Rc::new(|query, line| line.contains(query)))
+            .build();
+
+        assert_eq!(
+            vec!["Rust:", "safe, fast, productive.", "Pick three."],
             search(query, contents, Some(filter))
         );
     }
