@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fs;
+use std::iter::Filter;
 use std::rc::Rc;
 
 pub mod config;
@@ -8,6 +9,16 @@ use config::Config;
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let contents = fs::read_to_string(config.file_path)?;
 
+    let filter = build_filter(&config);
+
+    search(&config.query, &contents, Some(filter))
+        .iter()
+        .for_each(|line| println!("{line}"));
+
+    Ok(())
+}
+
+fn build_filter(config: &Config) -> Rc<FilterStrategy> {
     let mut filter_builder = FilterStrategyBuilder::new(Some(Rc::new(|query, line| line.contains(query))));
 
     if let Some(v) = config.min_line_len {
@@ -18,13 +29,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         filter_builder.and(Rc::new(move |_, line| line.len() >= v.try_into().unwrap()));
     }
 
-    let filter = filter_builder.build();
-
-    search(&config.query, &contents, Some(filter))
-        .iter()
-        .for_each(|line| println!("{line}"));
-
-    Ok(())
+    filter_builder.build()
 }
 
 // |query, line| -> filter_result
